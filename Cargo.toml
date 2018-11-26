@@ -1,11 +1,8 @@
 [package]
 name = "transportation"
-version = "5.2.0"
-authors = ["Jenna Magius <pyrosim@gmail.com>"]
-license = "BSD-2-Clause"
-description = "A callback wrapper around MIO"
-repository = "https://github.com/oxy-secure/transportation"
+version = "6.0.0-dev"
+authors = ["Your Name <you@example.com>"]
+edition = "2018"
 
 [dependencies]
-mio = "0.6"
-lazy_static = "1"
+mio = "0.6.16"
