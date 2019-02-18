@@ -6,66 +6,76 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone)]
 pub struct Reactor {
-    pub poll: Poll,
+    i: Rc<RefCell<ReactorInternal>>,
+}
+
+struct ReactorInternal {
+    poll: Poll,
     quit: bool,
     token_ticker: usize,
-    event_listeners: BTreeMap<Token, Rc<RefCell<FnMut(&mut Reactor, Event)>>>,
-    timeout_listeners: Vec<(Instant, Box<FnOnce(&mut Reactor)>)>,
+    event_listeners: BTreeMap<Token, Rc<RefCell<FnMut(Event)>>>,
+    timeout_listeners: Vec<(Instant, Box<FnOnce()>)>,
 }
 
 impl Reactor {
-    pub fn run(initializer: impl FnOnce(&mut Reactor)) {
-        let mut reactor = Reactor::new();
-        initializer(&mut reactor);
-        reactor.run_internal();
+    pub fn run(&self) {
+        self.run_internal();
     }
 
-    fn new() -> Reactor {
+    pub fn poll<T, R>(&self, callback: T) -> R
+    where
+        T: FnOnce(&Poll) -> R,
+    {
+        let lock = self.i.borrow();
+        callback(&lock.poll)
+    }
+
+    pub fn new() -> Reactor {
         let poll = Poll::new().expect("failed to create poll");
         let quit = false;
         let token_ticker = 0;
         let event_listeners = Default::default();
         let timeout_listeners = Default::default();
         Reactor {
-            poll,
-            quit,
-            token_ticker,
-            event_listeners,
-            timeout_listeners,
+            i: Rc::new(RefCell::new(ReactorInternal {
+                poll,
+                quit,
+                token_ticker,
+                event_listeners,
+                timeout_listeners,
+            })),
         }
     }
 
-    pub fn quit(&mut self) {
-        self.quit = true;
+    pub fn quit(&self) {
+        self.i.borrow_mut().quit = true;
     }
 
-    pub fn set_event_listener(
-        &mut self,
-        token: Token,
-        listener: impl FnMut(&mut Reactor, Event) + 'static,
-    ) {
-        self.event_listeners
+    pub fn set_event_listener(&self, token: Token, listener: impl FnMut(Event) + 'static) {
+        self.i
+            .borrow_mut()
+            .event_listeners
             .insert(token, Rc::new(RefCell::new(listener)));
     }
 
-    pub fn remove_event_listener(&mut self, token: Token) {
-        self.event_listeners.remove(&token);
+    pub fn remove_event_listener(&self, token: Token) {
+        self.i.borrow_mut().event_listeners.remove(&token);
     }
 
-    pub fn set_timeout(
-        &mut self,
-        timeout: Duration,
-        callback: impl FnOnce(&mut Reactor) + 'static,
-    ) {
+    pub fn set_timeout(&self, timeout: Duration, callback: impl FnOnce() + 'static) {
         let run_at = Instant::now() + timeout;
-        self.timeout_listeners.push((run_at, Box::new(callback)));
+        self.i
+            .borrow_mut()
+            .timeout_listeners
+            .push((run_at, Box::new(callback)));
     }
 
     pub fn set_interval(
-        &mut self,
+        &self,
         interval: Duration,
-        callback: impl FnMut(&mut Reactor) + 'static,
+        callback: impl FnMut() + 'static,
     ) -> IntervalHandle {
         let handle = IntervalHandle {
             cancelled: Rc::new(RefCell::new(false)),
@@ -76,25 +86,26 @@ impl Reactor {
     }
 
     fn reschedule_interval(
-        &mut self,
+        &self,
         interval: Duration,
         handle: IntervalHandle,
-        callback: Rc<RefCell<dyn FnMut(&mut Reactor)>>,
+        callback: Rc<RefCell<dyn FnMut()>>,
     ) {
-        self.set_timeout(interval, move |proxy| {
+        let proxy = self.clone();
+        self.set_timeout(interval, move || {
             if !handle.is_cancelled() {
                 proxy.reschedule_interval(interval, handle, callback.clone());
-                (&mut *callback.borrow_mut())(proxy);
+                (&mut *callback.borrow_mut())();
             }
         });
     }
 
-    pub fn issue_token(&mut self) -> Token {
-        let mine = self.token_ticker;
+    pub fn issue_token(&self) -> Token {
+        let mine = self.i.borrow().token_ticker;
         if mine == std::usize::MAX {
             panic!("Out of tokens");
         }
-        self.token_ticker += 1;
+        self.i.borrow_mut().token_ticker += 1;
         Token(mine)
     }
 
@@ -103,7 +114,7 @@ impl Reactor {
         let mut duration = None;
         let mut fire_at = None;
         let mut idx = 0;
-        for (candidate_idx, timeout) in self.timeout_listeners.iter().enumerate() {
+        for (candidate_idx, timeout) in self.i.borrow().timeout_listeners.iter().enumerate() {
             let candidate = timeout.0.duration_since(now);
             if duration.is_none() || candidate < duration.unwrap() {
                 duration = Some(candidate);
@@ -119,31 +130,33 @@ impl Reactor {
     }
 
     fn is_empty(&self) -> bool {
-        self.timeout_listeners.is_empty() && self.event_listeners.is_empty()
+        self.i.borrow().timeout_listeners.is_empty() && self.i.borrow().event_listeners.is_empty()
     }
 
-    fn run_internal(&mut self) {
+    fn run_internal(&self) {
         let mut events = Events::with_capacity(1024);
-        while !self.quit && !self.is_empty() {
+        while !self.i.borrow().quit && !self.is_empty() {
             let duration = self.calculate_duration();
-            self.poll
+            self.i
+                .borrow()
+                .poll
                 .poll(&mut events, duration.duration)
                 .expect("poll failed");
             if let Some(fire_at) = duration.fire_at {
                 if Instant::now() >= fire_at {
-                    let (_, callback) = self.timeout_listeners.remove(duration.idx);
-                    callback(self);
-                    if self.quit {
+                    let (_, callback) = self.i.borrow_mut().timeout_listeners.remove(duration.idx);
+                    callback();
+                    if self.i.borrow().quit {
                         break;
                     }
                 }
             }
             for event in events.iter() {
                 let token = event.token();
-                let handler = self.event_listeners.get(&token).cloned();
+                let handler = self.i.borrow().event_listeners.get(&token).cloned();
                 if let Some(handler) = handler {
-                    (&mut *handler.borrow_mut())(self, event);
-                    if self.quit {
+                    (&mut *handler.borrow_mut())(event);
+                    if self.i.borrow().quit {
                         break;
                     }
                 }
