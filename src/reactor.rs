@@ -11,6 +11,18 @@ pub struct Reactor {
     i: Rc<RefCell<ReactorInternal>>,
 }
 
+pub struct ReactorWeak {
+    i: std::rc::Weak<RefCell<ReactorInternal>>,
+}
+
+impl ReactorWeak {
+    pub fn upgrade(&self) -> Option<Reactor> {
+        Some(Reactor {
+            i: self.i.upgrade()?,
+        })
+    }
+}
+
 struct ReactorInternal {
     poll: Poll,
     quit: bool,
@@ -22,6 +34,16 @@ struct ReactorInternal {
 impl Reactor {
     pub fn run(&self) {
         self.run_internal();
+    }
+
+    pub fn downgrade(&self) -> ReactorWeak {
+        ReactorWeak {
+            i: Rc::downgrade(&self.i),
+        }
+    }
+
+    pub fn strong_count(&self) -> usize {
+        Rc::strong_count(&self.i)
     }
 
     pub fn poll<T, R>(&self, callback: T) -> R
@@ -115,7 +137,11 @@ impl Reactor {
         let mut fire_at = None;
         let mut idx = 0;
         for (candidate_idx, timeout) in self.i.borrow().timeout_listeners.iter().enumerate() {
-            let candidate = timeout.0.duration_since(now);
+            let candidate = if timeout.0 > now {
+                timeout.0.duration_since(now)
+            } else {
+                Duration::from_millis(0)
+            };
             if duration.is_none() || candidate < duration.unwrap() {
                 duration = Some(candidate);
                 fire_at = Some(timeout.0);
