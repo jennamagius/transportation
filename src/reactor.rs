@@ -31,6 +31,12 @@ struct ReactorInternal {
     timeout_listeners: Vec<(Instant, Box<FnOnce()>)>,
 }
 
+impl Default for Reactor {
+    fn default() -> Self {
+        Reactor::new()
+    }
+}
+
 impl Reactor {
     pub fn run(&self) {
         self.run_internal();
@@ -54,7 +60,7 @@ impl Reactor {
         callback(&lock.poll)
     }
 
-    pub fn new() -> Reactor {
+    pub fn new() -> Self {
         let poll = Poll::new().expect("failed to create poll");
         let quit = false;
         let token_ticker = 0;
@@ -80,6 +86,10 @@ impl Reactor {
             .borrow_mut()
             .event_listeners
             .insert(token, Rc::new(RefCell::new(listener)));
+    }
+
+    pub fn clear_event_listeners(&self) {
+        self.i.borrow_mut().event_listeners.clear();
     }
 
     pub fn remove_event_listener(&self, token: Token) {
